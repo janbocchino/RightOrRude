@@ -2,7 +2,6 @@ import streamlit as st
 import google.generativeai as genai
 import os
 import json
-import re # Import regex for parsing
 # --- API Key Configuration ---
 api_key = None
 try:
