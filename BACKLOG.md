@@ -1,7 +1,7 @@
 # Backlog for future features
 
 * meme reactions e.g. *YOU ARE NOT THE FATHER*
-* public link of judgement so that other people can comment
+* public link of judgement so that other people can comment and vote
 * way to send link to other party, and they can enter their perspective, get an individual judgement and then based on both views get a common judgement + advice for conflict resolution. 
 * multi agent voting + one final verdict 
     * having multiple personas e.g. sassy genZ chick, based gym bro, geek, mom, dad, etc.
