@@ -69,6 +69,38 @@ st.caption("Let AI help you judge your situation, inspired by AITA.")
 
 scenario = st.text_area("Describe your scenario:", height=200, placeholder="Tell me what happened...")
 
+# Define Personas and their instructions
+personas = {
+    "Brittany": "Analyze this scenario from the perspective of a sassy GenZ chick. Your language should be informal, use some slang, and focus on modern social dynamics and 'vibes'. Be brutally honest but maybe with a hint of humor.",
+    "Chad": "Analyze this scenario from the perspective of a 'based gym bro'. Your judgment should be direct, perhaps a bit blunt, and focus on personal accountability and strength. Use simple, straightforward language.",
+    "Mom": "Analyze this scenario from the perspective of a wise and experienced parent. Focus on empathy, communication, and the long-term consequences of actions on relationships and personal growth. Offer compassionate but firm advice.",
+    "Prof. Dr. Socrates": "Analyze this scenario from the perspective of a psychology professor. Focus on underlying motivations, cognitive biases, interpersonal dynamics, and potential psychological impacts. Use academic but accessible language.",
+    "Mrs. Jackson": "Analyze this scenario from the perspective of a teacher. Focus on fairness, rules, consequences, and what could be learned from the situation. Provide guidance as if explaining a lesson."
+}
+
+# Function to parse model response
+def parse_response(response_text, persona_name="Model"):
+    verdict = "Error"
+    score = 50
+    explanation = f"Could not parse the response for {persona_name}."
+    data = None
+    valid_verdicts = ["NTA", "YTA", "ESH", "NAH", "INFO"]
+
+    try:
+        data = json.loads(response_text)
+        if isinstance(data, dict) and \
+           'verdict' in data and isinstance(data['verdict'], str) and data['verdict'] in valid_verdicts and \
+           'score' in data and isinstance(data['score'], int) and \
+           'explanation' in data and isinstance(data['explanation'], str):
+            verdict = data['verdict']
+            score = max(0, min(100, data['score']))
+            explanation = data['explanation']
+        else:
+            explanation = f"Parsed JSON for {persona_name} does not match expected format.\nRaw Response:\n```\n{response_text}\n```"
+    except json.JSONDecodeError as e:
+        explanation = f"Failed to decode JSON response for {persona_name}: {e}\nRaw Response:\n```\n{response_text}\n```"
+    return verdict, score, explanation
+
 if st.button("Judge Me!"):
     # Check configuration status *before* attempting to use the model
     if not st.session_state.get("api_configured", False):
@@ -79,90 +111,122 @@ if st.button("Judge Me!"):
         st.warning("Please describe your scenario first.")
     else:
         model = st.session_state.gemini_model # Get model from session state
-        prompt = f"""
-        Analyze the following scenario based on the AITA (Am I The Asshole?) framework.
+        persona_results = []
+        with st.spinner("Getting opinions from the reviewers..."):
+            for persona_name, persona_instruction in personas.items():
+                persona_prompt = f"""
+                Analyze the following scenario based on the AITA (Am I The Asshole?) framework.
+                Adopt the persona of a '{persona_name}' with the following instructions: {persona_instruction}
+
+                Respond ONLY with a valid JSON object containing the following keys:
+                - "verdict": A string, one of "NTA", "YTA", "ESH", "NAH", "INFO".
+                - "score": An integer between 0 and 100 (0=NTA, 100=YTA).
+                - "explanation": A string explaining the reasoning for the verdict and score from your persona's viewpoint. Keep this explanation concise, ideally around two sentences. If the verdict is "YTA", the explanation should be significantly harsher and more direct in its criticism of the user's actions from your persona's viewpoint.
+
+                Ensure the output is nothing but the JSON object itself.
+
+                Scenario:
+                {scenario}
+                """
+                try:
+                    response = model.generate_content(persona_prompt)
+                    response_text = response.text.strip()
+                    verdict, score, explanation = parse_response(response_text, persona_name)
+                    persona_results.append({
+                        "name": persona_name,
+                        "verdict": verdict,
+                        "score": score,
+                        "explanation": explanation
+                    })
+                except Exception as e:
+                    st.error(f"Error generating response for {persona_name}: {e}")
+                    persona_results.append({
+                         "name": persona_name,
+                         "verdict": "Error",
+                         "score": 50,
+                         "explanation": f"An error occurred: {e}"
+                    })
+
+        # --- Judge Model ---
+        judge_prompt = f"""
+        You are the final judge in an AITA (Am I The Asshole?) scenario.
+        You have received the following scenario and several opinions from different reviewers.
+        Your task is to synthesize these opinions, the original scenario, and provide a final, objective verdict, score, and explanation.
+        Do not just average the results; provide a considered judgment based on the evidence and arguments presented by the reviewers.
+        If reviewers disagree, analyze the points of disagreement and determine which perspective is more convincing or applicable.
+
+        Original Scenario:
+        {scenario}
+
+        Reviewer Opinions:
+        """
+        for res in persona_results:
+            judge_prompt += f"\n--- {res['name']} ---\n"
+            judge_prompt += f"Verdict: {res['verdict']}\n"
+            judge_prompt += f"Score: {res['score']}\n"
+            judge_prompt += f"Explanation: {res['explanation']}\n"
+
+        judge_prompt += """
+        Based on the above, provide your final judgment.
         Respond ONLY with a valid JSON object containing the following keys:
         - "verdict": A string, one of "NTA", "YTA", "ESH", "NAH", "INFO".
         - "score": An integer between 0 and 100 (0=NTA, 100=YTA).
-        - "explanation": A string briefly explaining the reasoning for the verdict and score.
+        - "explanation": A string explaining your final reasoning, referencing the reviewer opinions where relevant. Your explanation should be objective and comprehensive.
 
         Ensure the output is nothing but the JSON object itself.
-
-        Scenario:
-        {scenario}
         """
-        try:
-            with st.spinner("Deliberating..."):
-                response = model.generate_content(prompt)
-                response_text = response.text.strip()
-
-            # --- Parse the JSON response ---
-            verdict = "Error"
-            score = 50 # Default score if parsing fails
-            explanation = "Could not parse the model's response."
-            data = None
-            valid_verdicts = ["NTA", "YTA", "ESH", "NAH", "INFO"]
-
-            max_attempts = 3
-            attempt = 0
-            while attempt < max_attempts:
-                try:
-                    data = json.loads(response_text)
-                    # Validate structure and values
-                    if isinstance(data, dict) and \
-                       'verdict' in data and isinstance(data['verdict'], str) and data['verdict'] in valid_verdicts and \
-                       'score' in data and isinstance(data['score'], int) and \
-                       'explanation' in data and isinstance(data['explanation'], str):
-
-                        verdict = data['verdict']
-                        # Clamp score just in case model returns out-of-range value
-                        score = max(0, min(100, data['score']))
-                        explanation = data['explanation']
-                        break
-                    else:
-                        st.warning(f"Parsed JSON does not match expected format. Data: {data}")
-                        explanation = f"Parsed JSON does not match expected format.\nRaw Response:\n```\n{response_text}\n```"
-                        break
-                except json.JSONDecodeError as e:
-                    attempt += 1
-                    if attempt >= max_attempts:
-                        st.warning(f"Failed to decode JSON response from model after {max_attempts} attempts: {e}")
-                        explanation = f"Model did not return valid JSON.\nRaw Response:\n```\n{response_text}\n```"
-
-            # --- Display results ---
-            st.subheader("Verdict:")
-            if verdict in valid_verdicts:
-                 st.markdown(f"## {verdict}")
-                 if verdict == "NTA":
-                     st.success("You are likely not the asshole.")
-                 elif verdict == "YTA":
-                     st.error("You might be the asshole.")
-                 elif verdict == "ESH":
-                     st.warning("It seems everyone involved shares some blame.")
-                 elif verdict == "NAH":
-                     st.info("No assholes here, just a complex situation.")
-                 elif verdict == "INFO":
-                     st.info("More information is needed to make a clear judgment.")
-
-                 # Display Score Bar
-                 st.subheader("AITA Score:")
-                 # Ensure score is treated as float for progress bar
-                 st.progress(float(score) / 100.0)
-                 st.caption(f"{score}% likelihood of being the Asshole")
-
-                 # Display Explanation
-                 st.subheader("Explanation:")
-                 st.markdown(explanation) # Display the parsed or error explanation
-
-            else: # Handle cases where verdict remains "Error" after parsing attempt
-                 st.error("Failed to get a valid verdict from the model.")
-                 st.subheader("Explanation:")
-                 st.markdown(explanation) # Show parsing error/raw response
+        final_verdict = "Error"
+        final_score = 50
+        final_explanation = "Could not get a final judgment."
+        valid_verdicts = ["NTA", "YTA", "ESH", "NAH", "INFO"]
 
 
-        except Exception as e:
-            st.error(f"An error occurred while contacting the AI model: {e}")
-            st.exception(e) # Show traceback for debugging
+        with st.spinner("The judge is deliberating..."):
+            try:
+                judge_response = model.generate_content(judge_prompt)
+                judge_response_text = judge_response.text.strip()
+                final_verdict, final_score, final_explanation = parse_response(judge_response_text, "Final Judge")
+            except Exception as e:
+                st.error(f"Error generating response from the Judge: {e}")
+                final_explanation = f"An error occurred while the judge was deliberating: {e}"
+
+        # --- Display results ---
+        # Create a separate expander for each persona
+        for res in persona_results:
+            persona_display_name = res['name'].replace('_', ' ').title()
+            with st.expander(f"{persona_display_name}", expanded=False):
+                st.markdown(f"Verdict: **{res['verdict']}**")
+                st.markdown(f"Score: {res['score']}")
+                st.markdown(f"Explanation: {res['explanation']}")
+
+        st.subheader("Final Verdict from the Judge:")
+        if final_verdict in valid_verdicts:
+             st.markdown(f"## {final_verdict}")
+             if final_verdict == "NTA":
+                 st.success("You are likely not the asshole (Final Judgment).")
+             elif final_verdict == "YTA":
+                 st.error("You might be the asshole (Final Judgment).")
+             elif final_verdict == "ESH":
+                 st.warning("It seems everyone involved shares some blame (Final Judgment).")
+             elif final_verdict == "NAH":
+                 st.info("No assholes here, just a complex situation (Final Judgment).")
+             elif final_verdict == "INFO":
+                 st.info("More information is needed to make a clear judgment (Final Judgment).")
+
+             # Display Score Bar for Final Verdict
+             st.subheader("AITA Score (Final Judgment):")
+             st.progress(float(final_score) / 100.0)
+             st.caption(f"{final_score}% likelihood of being the Asshole (Final Judgment)")
+
+             # Display Final Explanation
+             st.subheader("Explanation (Final Judgment):")
+             st.markdown(final_explanation)
+
+        else: # Handle cases where final verdict remains "Error"
+             st.error("Failed to get a valid final verdict from the Judge.")
+             st.subheader("Explanation (Final Judgment):")
+             st.markdown(final_explanation)
+
 
 st.markdown("---")
 st.markdown("Note, don't use this with your partner - it will likely piss them off.")
